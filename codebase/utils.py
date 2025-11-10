@@ -46,3 +46,44 @@ def subtract_background(curves: dict, background: dict) -> dict:
             "dsc": dsc - dsc_b_interp,
         }
     return result
+
+
+
+def slice_curve_idx(curve: dict, i_start=None, i_end=None) -> dict:
+    """
+    Slice a single DSC curve dictionary by index range.
+
+    Parameters
+    ----------
+    curve : dict
+        A dictionary with at least "T" and "dsc" keys.
+        e.g. {"T": array([...]), "dsc": array([...]), ...}
+    i_start : int, optional
+        Start index (inclusive). Defaults to the beginning.
+    i_end : int, optional
+        End index (exclusive). Defaults to the end.
+
+    Returns
+    -------
+    dict
+        New dictionary containing only the specified index range.
+        Other metadata (if any) is preserved.
+    """
+    T = np.asarray(curve["T"])
+    n = len(T)
+
+    # Normalize indices
+    if i_start is None:
+        i_start = 0
+    if i_end is None or i_end > n:
+        i_end = n
+
+    # Slice all array-like fields that match T’s shape
+    sliced = {}
+    for key, value in curve.items():
+        if isinstance(value, np.ndarray) and value.shape == T.shape:
+            sliced[key] = value[i_start:i_end]
+        else:
+            sliced[key] = value
+
+    return sliced
