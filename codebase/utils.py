@@ -48,7 +48,6 @@ def subtract_background(curves: dict, background: dict) -> dict:
     return result
 
 
-
 def slice_curve_idx(curve: dict, i_start=None, i_end=None) -> dict:
     """
     Slice a single DSC curve dictionary by index range.
@@ -69,7 +68,7 @@ def slice_curve_idx(curve: dict, i_start=None, i_end=None) -> dict:
         New dictionary containing only the specified index range.
         Other metadata (if any) is preserved.
     """
-    T = np.asarray(curve["T"])
+    T = curve["T"]
     n = len(T)
 
     # Normalize indices
