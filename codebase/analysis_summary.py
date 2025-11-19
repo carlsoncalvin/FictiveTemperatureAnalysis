@@ -122,10 +122,22 @@ def _choose_reference_segments(ref_segs, segs_to_keep):
 
 
 def _build_reference_curve(data, ref_segs, segs_to_keep):
-    """Return reference curve and remaining sample data."""
+    """Return reference curve and remaining sample data. Cuts references to same size before
+    averaging."""
     segs_to_keep = _choose_reference_segments(ref_segs, segs_to_keep)
 
     selected = {k: data[k] for k in segs_to_keep}
+
+    # cut references to same size if differ in length
+    # IT IS ASSUMED THAT LENGTH DIFFERS AT THE END
+    # THERE IS NO CHECK FOR THIS
+    min_len = np.inf
+    for seg in selected.values():
+        min_len = min(min_len, len(seg["T"]))
+
+    for k in list(selected.keys()):
+        selected[k] = slice_curve_idx(selected[k], i_end=min_len)
+
     ref = average_curves(selected)
 
     # Remove all reference segments from the data dict
@@ -318,7 +330,7 @@ def _plot_Tf_vs_ta(all_t_a, all_Tf, quiet):
 def _compute_Ta_corrected(T_a, temp_polynomial):
     """Return Ta_corrected if a polynomial is given, else just T_a."""
     if temp_polynomial is None:
-        return T_a, None, None
+        return T_a
     a, b = temp_polynomial
     Ta_corrected = T_a + a + b * T_a
     return Ta_corrected
