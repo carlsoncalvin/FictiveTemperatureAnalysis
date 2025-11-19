@@ -6,162 +6,206 @@ from data_parser import parse_mettler_dsc_txt_file, extract_T_and_dsc
 from fictive_temp_functions import baseline_correction, fictive_temperature
 from utils import average_curves, subtract_background, slice_curve_idx
 
-def summarize_flash_data(T_a,
-                         data_path,
-                         ref_segs,
-                         *,
-                         bg_path=None,
-                         cut_idx=200,
-                         temp_polynomial=None,
-                         plot_range=(-20, 220),
-                         t_a_start_exponent=-3,
-                         all_t_a=None,
-                         segs_to_keep=None,
-                         T1=None, T2=None,
-                         autosave=False,
-                         quiet=False,):
 
+# ---------- Small helpers ----------
+
+def _load_curves(data_path, bg_path=None):
+    """Load sample data and optional background, returning (data, background)."""
+    # main data
+    results = parse_mettler_dsc_txt_file(data_path)
+    data = extract_T_and_dsc(results)
+
+    background = None
     if bg_path is not None:
-        # get background curve
         bg_results = parse_mettler_dsc_txt_file(bg_path)
         bg_data = extract_T_and_dsc(bg_results)
         background = average_curves(bg_data)
 
-    # get data
-    results = parse_mettler_dsc_txt_file(data_path)
+    return data, background
 
-    # get only necessary data for analysis
-    data = extract_T_and_dsc(results)
 
-    # correct temperature
-    # T_corrected - T_exp = a + b * T_exp
-    if temp_polynomial is not None:
-        a, b = temp_polynomial
-        for curve in data.values():
-            curve["T"] = a + b*curve["T"] + curve["T"]
-        if bg_path is not None:
-            background["T"] = a + b*background["T"] + background["T"]
+def _apply_temp_polynomial(data, background, temp_polynomial):
+    """Apply T_corrected - T_exp = a + b*T_exp to all curves and background."""
+    if temp_polynomial is None:
+        return data, background
 
-    # slice unwated data
-    for key in data:
-        data[key] = slice_curve_idx(data[key], i_start=cut_idx)
+    a, b = temp_polynomial
+
+    for curve in data.values():
+        T = curve["T"]
+        curve["T"] = T + a + b * T
+
+    if background is not None:
+        T_bg = background["T"]
+        background["T"] = T_bg + a + b * T_bg
+
+    return data, background
+
+
+def _slice_curves(data, cut_idx):
+    """Slice all curves from index cut_idx onwards."""
+    if cut_idx is None:
+        return data
+    for k in list(data.keys()):
+        data[k] = slice_curve_idx(data[k], i_start=cut_idx)
+    return data
+
+
+def _subtract_background_with_optional_plots(data, background, quiet):
+    """Subtract background; optionally show before/after plots."""
+    if background is None:
+        return data
 
     if quiet:
-        if bg_path is not None:
-            data = subtract_background(data, background)
-    elif not quiet and bg_path is not None:
-        fig, (ax1, ax2) = plt.subplots(1,2, figsize=(10, 4))
-        for curve in data.values():
-            ax1.plot(curve["T"], curve["dsc"])
+        return subtract_background(data, background)
 
-        # subtract background
-        data = subtract_background(data, background)
-        for curve in data.values():
-            ax2.plot(curve["T"], curve["dsc"])
-        ax1.title.set_text("Raw data")
-        ax2.title.set_text("Background subtracted")
-        plt.show()
+    # Show raw vs bg-subtracted
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
 
-        plt.figure()
-        for seg in ref_segs:
+    for curve in data.values():
+        ax1.plot(curve["T"], curve["dsc"])
+    ax1.set_title("Raw data")
+
+    data = subtract_background(data, background)
+
+    for curve in data.values():
+        ax2.plot(curve["T"], curve["dsc"])
+    ax2.set_title("Background subtracted")
+
+    for ax in (ax1, ax2):
+        ax.set_xlabel("T / °C")
+        ax.set_ylabel("Heat Flow / mW")
+
+    plt.tight_layout()
+    plt.show()
+
+    return data
+
+
+def _plot_reference_segments_for_selection(data, ref_segs, quiet):
+    """Plot candidate reference segments to help decide which to keep."""
+    if quiet:
+        return
+
+    plt.figure()
+    for seg in ref_segs:
+        if seg in data:
             plt.plot(data[seg]["T"], data[seg]["dsc"], label=f"Segment {seg}")
-        plt.legend()
-        plt.title("Reference curves")
-        plt.show()
+    plt.legend()
+    plt.title("Candidate reference segments")
+    plt.xlabel("T / °C")
+    plt.ylabel("Heat Flow / mW")
+    plt.show()
 
-    # logic to determine reference segments to use
-    if not segs_to_keep:
-        while True:
-            keep_segs = input("Keep all reference segments? (y/n) ")
-            if keep_segs.lower() in ["y", "yes"]:
-                segs_to_keep = ref_segs
-                break
-            elif keep_segs.lower() in ["n", "no"]:
-                while True:
-                    segs_to_keep = input("Enter segment numbers to keep separated by spaces: ")
-                    segs_to_keep = segs_to_keep.split()
-                    try:
-                        segs_to_keep = [int(seg) for seg in segs_to_keep]
-                    except ValueError:
-                        print("Invalid input. Please enter integer segment numbers separated by spaces.")
-                        continue
-                    if all(seg in ref_segs for seg in segs_to_keep):
-                        break
-                    else:
-                        print(f"Invalid input. Valid segment numbers are {ref_segs}.")
-                break
-            else:
-                print("Invalid input. Please enter 'y' or 'n'.")
 
-    selected = {key: data[key] for key in segs_to_keep}
+def _choose_reference_segments(ref_segs, segs_to_keep):
+    """Decide which reference segments to keep (interactive if segs_to_keep is None)."""
+    if segs_to_keep is not None:
+        return list(segs_to_keep)
 
-    # average reference segments to get 1 curve
+    while True:
+        keep_segs = input(f"Keep all reference segments {ref_segs}? (y/n) ")
+        if keep_segs.lower() in {"y", "yes"}:
+            return list(ref_segs)
+        if keep_segs.lower() in {"n", "no"}:
+            while True:
+                segs_to_keep_str = input("Enter segment numbers to keep separated by spaces: ")
+                try:
+                    segs = [int(seg) for seg in segs_to_keep_str.split()]
+                except ValueError:
+                    print("Invalid input. Please enter integer segment numbers separated by spaces.")
+                    continue
+                if all(seg in ref_segs for seg in segs):
+                    return segs
+                print(f"Invalid input. Valid segment numbers are {ref_segs}.")
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+
+def _build_reference_curve(data, ref_segs, segs_to_keep):
+    """Return reference curve and remaining sample data."""
+    segs_to_keep = _choose_reference_segments(ref_segs, segs_to_keep)
+
+    selected = {k: data[k] for k in segs_to_keep}
     ref = average_curves(selected)
 
-    # remove all references from data dict
+    # Remove all reference segments from the data dict
     for seg in ref_segs:
-        data.pop(seg)
+        data.pop(seg, None)
 
-    # take last segment for plotting
-    sample = data[sorted(data.keys())[-1]]
+    return ref, data
 
-    # plot curves to find good T1 and T2
-    if not quiet:
-        fig, axs = plt.subplots(1, 2, figsize=(9, 4))
-        ax1, ax2 = axs
-        for ax in axs:
-            ax.plot(ref["T"], ref["dsc"], label="Reference")
-            ax.set_xlabel("T /$\degree$C")
-            ax.grid(axis="x")
 
-        ax1.plot(sample["T"], sample["dsc"], label="Sample")
-        ax1.set_ylabel("Heat Flow / mW")
+def _plot_reference_and_sample_for_ranges(ref, sample, plot_range, quiet):
+    """Show plots used to visually choose T1, T2."""
+    if quiet:
+        return
 
-        ax2.plot(sample["T"], sample["dsc"], label="Sample")
-        x1, x2 = plot_range
-        ax2.set_xlim(x1, x2)
-        ax2.set_xticks(range(x1, x2, 20))
+    fig, axs = plt.subplots(1, 2, figsize=(9, 4))
+    ax1, ax2 = axs
 
-        fig.tight_layout()
-        plt.show()
+    for ax in axs:
+        ax.plot(ref["T"], ref["dsc"], label="Reference")
+        ax.set_xlabel("T / °C")
+        ax.grid(axis="x")
 
-    # input logic for getting T1 and T2
-    if not T1 or not T2:
-        while True:
-            keep = input("Keep default T1 and T2? (-40, 20), (140, 220) (y/n) ")
-            if keep.lower() in ["y", "yes"]:
-                T1 = (-40, 20)
-                T2 = (140, 220)
-                break
-            elif keep.lower() in ["n", "no"]:
-                while True:
-                    T_ranges = input("Enter T1 and T2 ranges separated by spaces: ")
-                    try:
-                        T_ranges = [int(T) for T in T_ranges.split()]
-                    except ValueError:
-                        print("Invalid input. Please enter integer temperatures separated by spaces.")
-                        continue
-                    if len(T_ranges) == 4:
-                       T1 = (T_ranges[0], T_ranges[1])
-                       T2 = (T_ranges[2], T_ranges[3])
-                       break
-                    else:
-                        print("Invalid input. Please enter 4 integers separated by spaces.")
-                break
+    ax1.plot(sample["T"], sample["dsc"], label="Sample")
+    ax1.set_ylabel("Heat Flow / mW")
 
-    # compute baseline-corrected curve and save
+    ax2.plot(sample["T"], sample["dsc"], label="Sample")
+    x1, x2 = plot_range
+    ax2.set_xlim(x1, x2)
+    ax2.set_xticks(range(x1, x2, 20))
+
+    for ax in axs:
+        ax.legend()
+
+    fig.tight_layout()
+    plt.show()
+
+
+def _choose_T_ranges(T1, T2, quiet):
+    """Choose T1, T2 for baseline regions (interactive if missing)."""
+    if T1 is not None and T2 is not None:
+        return T1, T2
+
+    if quiet:
+        # fall back to defaults if we can't ask
+        return (0, 60), (140, 200)
+
+    while True:
+        keep = input("Keep default T1 and T2? (0, 60), (140, 200) (y/n) ")
+        if keep.lower() in {"y", "yes"}:
+            return (0, 60), (140, 200)
+
+        if keep.lower() in {"n", "no"}:
+            while True:
+                T_ranges_str = input("Enter T1 and T2 ranges as 4 integers (T1_low T1_high T2_low T2_high): ")
+                try:
+                    vals = [int(T) for T in T_ranges_str.split()]
+                except ValueError:
+                    print("Invalid input. Please enter integer temperatures separated by spaces.")
+                    continue
+                if len(vals) == 4:
+                    return (vals[0], vals[1]), (vals[2], vals[3])
+                print("Invalid input. Please enter exactly 4 integers separated by spaces.")
+
+        print("Invalid input. Please enter 'y' or 'n'.")
+
+
+def _baseline_correct_all(data, ref, sample, T1, T2, quiet):
+    """Baseline correct sample and all curves; return sample_corrected and updated data."""
     dsc_corrected = baseline_correction(sample, ref, T1, T2)
 
     sample_corrected = sample.copy()
     sample_corrected["dsc"] = dsc_corrected
 
-    # plot raw and corrected curves
     if not quiet:
         fig, axs = plt.subplots(1, 2, figsize=(9, 4), sharey=True)
         ax1, ax2 = axs
+
         for ax in axs:
             ax.plot(ref["T"], ref["dsc"], label="Reference")
-            ax.set_xlabel("T /$\degree$C")
+            ax.set_xlabel("T / °C")
 
         ax1.plot(sample["T"], sample["dsc"], label="Sample")
         ax1.set_title("Sample and Reference Raw")
@@ -170,95 +214,234 @@ def summarize_flash_data(T_a,
         ax2.plot(sample_corrected["T"], sample_corrected["dsc"], label="Corrected Sample")
         ax2.set_title("Sample and Reference Corrected")
 
-        fig.tight_layout()
         for ax in axs:
             ax.legend()
+
+        fig.tight_layout()
         plt.show()
 
-    # correct all data
+    # Correct all curves in-place
     for curve in data.values():
         curve["dsc"] = baseline_correction(curve, ref, T1, T2)
 
-    # compute and plot fictive temperature example
-    if not quiet:
-        Tf_results = fictive_temperature(sample_corrected, T1, T2)
+    return sample_corrected, data
 
-        plt.plot(sample_corrected["T"], sample_corrected["dsc"])
 
-        T_slice = Tf_results["T_slice"]
+def _plot_fictive_example(sample_corrected, sample_raw, T1, T2, quiet):
+    """Plot the example fictive temperature construction on one curve."""
+    if quiet:
+        return None
 
-        plt.plot(T_slice, Tf_results["glass_line"], label="Glass line")
-        plt.plot(T_slice, Tf_results["liquid_line"], label="Liquid line")
-        plt.vlines(Tf_results["Tf"], min(sample["dsc"]), max(sample["dsc"]), color="k", linestyles="--",
-                   label=f"T$_f$={Tf_results["Tf"]}")
-        plt.xlabel("T /$\degree$C")
-        plt.ylabel("Heat Flow / mW")
-        plt.legend()
-        plt.show()
+    Tf_results = fictive_temperature(sample_corrected, T1, T2)
 
-        # plot all corrected curves
-        plt.figure()
-        for curve in data.values():
-            plt.plot(curve["T"], curve["dsc"])
-        plt.xlabel("T /$\degree$C")
-        plt.ylabel("Heat Flow / mW")
-        plt.show()
+    plt.figure()
+    plt.plot(sample_corrected["T"], sample_corrected["dsc"], label="Corrected sample")
 
-    # get aging times
-    if all_t_a:
-        pass
-    else:
-        # compute aging times from default pattern
-        all_t_a = np.empty_like(list(data.keys()), dtype=float)
+    T_slice = Tf_results["T_slice"]
+    plt.plot(T_slice, Tf_results["glass_line"], label="Glass line")
+    plt.plot(T_slice, Tf_results["liquid_line"], label="Liquid line")
 
-        i = 0
-        for e in range(t_a_start_exponent, 6):
-            for p in [1, 2, 5]:
-                if i == len(all_t_a):
-                    break
-                all_t_a[i] = p * 10 ** e
-                i += 1
-        if all_t_a[-1] == 100000:
-            all_t_a[-1] = 90000
+    Tf_val = Tf_results["Tf"]
+    plt.vlines(
+        Tf_val,
+        np.min(sample_raw["dsc"]),
+        np.max(sample_raw["dsc"]),
+        color="k",
+        linestyles="--",
+        label=f"T$_f$={Tf_val:.2f} °C",
+    )
 
-    all_Tf = np.empty_like(all_t_a)
+    plt.xlabel("T / °C")
+    plt.ylabel("Heat Flow / mW")
+    plt.legend()
+    plt.title("Fictive temperature construction")
+    plt.show()
 
-    for i, key in enumerate(sorted(data)):
+    return Tf_results
+
+
+def _plot_all_corrected(data, quiet):
+    if quiet:
+        return
+    plt.figure()
+    for curve in data.values():
+        plt.plot(curve["T"], curve["dsc"])
+    plt.xlabel("T / °C")
+    plt.ylabel("Heat Flow / mW")
+    plt.title("All corrected curves")
+    plt.show()
+
+
+def _generate_default_ta(num_curves, t_a_start_exponent):
+    """Generate default aging times 1,2,5 × 10^e from e=t_a_start_exponent to 5."""
+    all_t_a = np.empty(num_curves, dtype=float)
+
+    i = 0
+    for e in range(t_a_start_exponent, 6):  # up to 10^5
+        for p in (1, 2, 5):
+            if i == num_curves:
+                break
+            all_t_a[i] = p * 10.0 ** e
+            i += 1
+        if i == num_curves:
+            break
+
+    # special-case tweak
+    if num_curves > 0 and all_t_a[-1] == 100000:
+        all_t_a[-1] = 90000
+
+    return all_t_a
+
+
+def _compute_all_Tf(data, T1, T2):
+    """Compute fictive temperature for each curve in data, sorted by segment key."""
+    keys = sorted(data.keys())
+    all_Tf = np.empty(len(keys), dtype=float)
+    for i, key in enumerate(keys):
         Tf_results = fictive_temperature(data[key], T1, T2)
         all_Tf[i] = Tf_results["Tf"]
+    return all_Tf
 
-    if not quiet:
-        plt.figure()
-        plt.scatter(all_t_a, all_Tf)
-        plt.xscale("log")
-        plt.xlabel("t$_a$ / s")
-        plt.ylabel("T$_f$ / $\degree$ C")
-        plt.show()
 
-    Ta_corrected = a + b * T_a + T_a
-    if not quiet:
-        print(f"\nTf min is {min(all_Tf)}")
-        print(f"Ta corrected is {Ta_corrected}")
+def _plot_Tf_vs_ta(all_t_a, all_Tf, quiet):
+    if quiet:
+        return
+    plt.figure()
+    plt.scatter(all_t_a, all_Tf)
+    plt.xscale("log")
+    plt.xlabel("t$_a$ / s")
+    plt.ylabel("T$_f$ / °C")
+    plt.title("Fictive temperature vs aging time")
+    plt.show()
+
+
+def _compute_Ta_corrected(T_a, temp_polynomial):
+    """Return Ta_corrected if a polynomial is given, else just T_a."""
+    if temp_polynomial is None:
+        return T_a, None, None
+    a, b = temp_polynomial
+    Ta_corrected = T_a + a + b * T_a
+    return Ta_corrected
+
+
+def _maybe_save_summary(summary, data_path, T_a, autosave):
+    """Interactive saving logic"""
+    data_branch = "/".join(data_path.split("/")[:-1]) or "."
 
     while True:
-        save = autosave or input("Save data? (y/n) ")
-        if autosave or save.lower() in ["y", "yes"]:
-            dname = autosave or input(f"Use default name? [{T_a}] (y/n) : ")
-            if autosave or dname.lower() in ["y", "yes"]:
-                name = T_a
-            elif dname.lower() in ["n", "no"]:
-                name = input("Enter file name (.pkl is automatically appended): ")
+        if autosave:
+            # autosave acts as a file name if it's a string,
+            # otherwise use default name based on T_a
+            if isinstance(autosave, str):
+                name = autosave
             else:
-                print("Invalid input. Please enter 'y' or 'n'.")
-                continue
-            data_branch = "/".join(data_path.split("/")[:-1])
-            summary = {"Ta": T_a, "Ta_corr": Ta_corrected, "all_ta": all_t_a, "all_Tf": all_Tf}
-            # serialize data
-            with open(f'{data_branch}/{name}.pkl', 'wb') as handle:
-                pickle.dump(summary, handle)
+                name = str(T_a)
             break
-        elif save.lower() in ["n", "no"]:
-            break
+
+        save = input("Save data? (y/n) ")
+        if save.lower() in {"y", "yes"}:
+            dname = input(f"Use default name? [{T_a}] (y/n) : ")
+            if dname.lower() in {"y", "yes"}:
+                name = str(T_a)
+                break
+            if dname.lower() in {"n", "no"}:
+                name = input("Enter file name (.pkl is automatically appended): ")
+                break
+            print("Invalid input. Please enter 'y' or 'n'.")
+        elif save.lower() in {"n", "no"}:
+            return  # do not save
         else:
             print("Invalid input. Please enter 'y' or 'n'.")
 
+    filepath = f"{data_branch}/{name}.pkl"
+    with open(filepath, "wb") as handle:
+        pickle.dump(summary, handle)
+
+
+# ---------- Main function ----------
+
+def summarize_flash_data(
+    T_a,
+    data_path,
+    ref_segs,
+    *,
+    bg_path=None,
+    cut_idx=200,
+    temp_polynomial=None,
+    plot_range=(-20, 220),
+    t_a_start_exponent=-3,
+    all_t_a=None,
+    segs_to_keep=None,
+    T1=None,
+    T2=None,
+    autosave=False,
+    quiet=False,
+):
+    """
+    End-to-end analysis pipeline for flash DSC data at a single annealing temperature.
+
+    Returns
+    -------
+    summary : dict
+        {"Ta": T_a, "Ta_corr": Ta_corrected, "all_ta": all_t_a, "all_Tf": all_Tf}
+    """
+
+    # 1) Load curves (and optional background)
+    data, background = _load_curves(data_path, bg_path)
+
+    # 2) Temperature correction
+    data, background = _apply_temp_polynomial(data, background, temp_polynomial)
+
+    # 3) Slice unwanted initial points
+    data = _slice_curves(data, cut_idx)
+
+    # 4) Background subtraction
+    data = _subtract_background_with_optional_plots(data, background, quiet)
+
+    # 5) Show candidate reference segments, then build reference from selection
+    _plot_reference_segments_for_selection(data, ref_segs, quiet)
+    ref, data = _build_reference_curve(data, ref_segs, segs_to_keep)
+
+    # 6) Choose a "sample" curve for plotting (largest segment number)
+    sample_key = sorted(data.keys())[-1]
+    sample = data[sample_key]
+
+    # 7) Plot ref+sample to help choose T1/T2, then choose them
+    _plot_reference_and_sample_for_ranges(ref, sample, plot_range, quiet)
+    T1, T2 = _choose_T_ranges(T1, T2, quiet)
+
+    # 8) Baseline correction for sample and all curves
+    sample_corrected, data = _baseline_correct_all(data, ref, sample, T1, T2, quiet)
+
+    # 9) Plot fictive construction + corrected curves
+    _plot_fictive_example(sample_corrected, sample, T1, T2, quiet)
+    _plot_all_corrected(data, quiet)
+
+    # 10) Aging times t_a
+    if all_t_a is None:
+        all_t_a = _generate_default_ta(len(data), t_a_start_exponent)
+
+    # 11) Compute fictive temperatures for all curves
+    all_Tf = _compute_all_Tf(data, T1, T2)
+
+    # 12) Plot Tf vs ta
+    _plot_Tf_vs_ta(all_t_a, all_Tf, quiet)
+
+    # 13) Correct Ta (if polynomial given)
+    Ta_corrected = _compute_Ta_corrected(T_a, temp_polynomial)
+
+    if not quiet:
+        print(f"\nTf min is {np.min(all_Tf):.2f} °C")
+        print(f"Ta corrected is {Ta_corrected:.2f} °C")
+
+    # 14) Build summary and maybe save
+    summary = {
+        "Ta": T_a,
+        "Ta_corr": Ta_corrected,
+        "all_ta": all_t_a,
+        "all_Tf": all_Tf,
+    }
+
+    _maybe_save_summary(summary, data_path, T_a, autosave)
+
+    return summary
