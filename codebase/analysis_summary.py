@@ -121,12 +121,17 @@ def _choose_reference_segments(ref_segs, segs_to_keep):
         print("Invalid input. Please enter 'y' or 'n'.")
 
 
-def _build_reference_curve(data, ref_segs, segs_to_keep):
+def _build_reference_curve(data, ref_segs, segs_to_keep, multiref):
     """Return reference curve and remaining sample data. Cuts references to same size before
     averaging."""
     segs_to_keep = _choose_reference_segments(ref_segs, segs_to_keep)
 
     selected = {k: data[k] for k in segs_to_keep}
+
+    if multiref is not None:
+        multiref_data = {k: data[k] for k in multiref}
+    else :
+        multiref_data = None
 
     # cut references to same size if differ in length
     # IT IS ASSUMED THAT LENGTH DIFFERS AT THE END
@@ -144,7 +149,7 @@ def _build_reference_curve(data, ref_segs, segs_to_keep):
     for seg in ref_segs:
         data.pop(seg, None)
 
-    return ref, data
+    return ref, data, multiref_data
 
 
 def _plot_reference_and_sample_for_ranges(ref, sample, plot_range, quiet):
@@ -204,7 +209,7 @@ def _choose_T_ranges(T1, T2, quiet):
         print("Invalid input. Please enter 'y' or 'n'.")
 
 
-def _baseline_correct_all(data, ref, sample, T1, T2, quiet):
+def _baseline_correct_all(data, ref, sample, T1, T2, quiet, multiref_data):
     """Baseline correct sample and all curves; return sample_corrected and updated data."""
     dsc_corrected = baseline_correction(sample, ref, T1, T2)
 
@@ -233,8 +238,17 @@ def _baseline_correct_all(data, ref, sample, T1, T2, quiet):
         plt.show()
 
     # Correct all curves in-place
-    for curve in data.values():
-        curve["dsc"] = baseline_correction(curve, ref, T1, T2)
+    if multiref_data is not None:
+        for key in data:
+            if int(key)+4 in multiref_data:
+                multiref = multiref_data[int(key)+4]
+            else:
+                min_key = sorted(multiref_data.keys())[0]
+                multiref = multiref_data[min_key]
+            data[key]["dsc"] = baseline_correction(data[key], multiref, T1, T2)
+    else:
+        for curve in data.values():
+            curve["dsc"] = baseline_correction(curve, ref, T1, T2)
 
     return sample_corrected, data
 
@@ -380,6 +394,7 @@ def summarize_flash_data(
     bg_path=None,
     cut_idx=200,
     temp_polynomial=None,
+    static_polynomial=None,
     plot_range=(-20, 220),
     t_a_start_exponent=-3,
     all_t_a=None,
@@ -388,6 +403,8 @@ def summarize_flash_data(
     T2=None,
     autosave=False,
     quiet=False,
+    correct_baseline=True,
+    multiref=False,
 ):
     """
     End-to-end analysis pipeline for flash DSC data at a single annealing temperature.
@@ -395,7 +412,7 @@ def summarize_flash_data(
     Returns
     -------
     summary : dict
-        {"Ta": T_a, "Ta_corr": Ta_corrected, "all_ta": all_t_a, "all_Tf": all_Tf}
+        {"Ta": T_a, "Ta_corr": Ta_corrected, "Tfq": Tfq, "all_ta": all_t_a, "all_Tf": all_Tf}
     """
 
     # 1) Load curves (and optional background)
@@ -412,7 +429,7 @@ def summarize_flash_data(
 
     # 5) Show candidate reference segments, then build reference from selection
     _plot_reference_segments_for_selection(data, ref_segs, quiet)
-    ref, data = _build_reference_curve(data, ref_segs, segs_to_keep)
+    ref, data, multiref_data = _build_reference_curve(data, ref_segs, segs_to_keep, multiref)
 
     # 6) Choose a "sample" curve for plotting (largest segment number)
     sample_key = sorted(data.keys())[-1]
@@ -423,7 +440,10 @@ def summarize_flash_data(
     T1, T2 = _choose_T_ranges(T1, T2, quiet)
 
     # 8) Baseline correction for sample and all curves
-    sample_corrected, data = _baseline_correct_all(data, ref, sample, T1, T2, quiet)
+    if correct_baseline:
+        sample_corrected, data = _baseline_correct_all(data, ref, sample, T1, T2, quiet, multiref_data)
+    else:
+        sample_corrected = sample
 
     # 9) Plot fictive construction + corrected curves
     _plot_fictive_example(sample_corrected, sample, T1, T2, quiet)
@@ -433,14 +453,17 @@ def summarize_flash_data(
     if all_t_a is None:
         all_t_a = _generate_default_ta(len(data), t_a_start_exponent)
 
-    # 11) Compute fictive temperatures for all curves
+    # 11) Compute fictive temperatures for reference (Tfq) and all curves
+    Tfq = fictive_temperature(ref, T1, T2)["Tf"]
     all_Tf = _compute_all_Tf(data, T1, T2)
 
     # 12) Plot Tf vs ta
     _plot_Tf_vs_ta(all_t_a, all_Tf, quiet)
 
-    # 13) Correct Ta (if polynomial given)
-    Ta_corrected = _compute_Ta_corrected(T_a, temp_polynomial)
+    # 13) Correct Ta. Uses temp polynomial if static isn´t given. If neither is given, do nothing
+    if static_polynomial is None:
+        static_polynomial = temp_polynomial
+    Ta_corrected = _compute_Ta_corrected(T_a, static_polynomial)
 
     if not quiet:
         print(f"\nTf min is {np.min(all_Tf):.2f} °C")
@@ -450,6 +473,7 @@ def summarize_flash_data(
     summary = {
         "Ta": T_a,
         "Ta_corr": Ta_corrected,
+        "Tfq": Tfq,
         "all_ta": all_t_a,
         "all_Tf": all_Tf,
     }
