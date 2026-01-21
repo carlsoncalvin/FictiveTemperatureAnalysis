@@ -404,7 +404,7 @@ def summarize_flash_data(
     autosave=False,
     quiet=False,
     correct_baseline=True,
-    multiref=False,
+    multiref=None,
 ):
     """
     End-to-end analysis pipeline for flash DSC data at a single annealing temperature.
@@ -476,6 +476,8 @@ def summarize_flash_data(
         "Tfq": Tfq,
         "all_ta": all_t_a,
         "all_Tf": all_Tf,
+        "ref": ref,
+        "data": data
     }
 
     _maybe_save_summary(summary, data_path, T_a, autosave)
