@@ -303,7 +303,7 @@ def _generate_default_ta(num_curves, t_a_start_exponent):
     all_t_a = np.empty(num_curves, dtype=float)
 
     i = 0
-    for e in range(t_a_start_exponent, 6):  # up to 10^5
+    for e in range(t_a_start_exponent, 7):  # up to 10^5
         for p in (1, 2, 5):
             if i == num_curves:
                 break
