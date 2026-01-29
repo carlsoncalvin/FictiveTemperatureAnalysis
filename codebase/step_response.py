@@ -58,12 +58,12 @@ def boxcar(x, box_length):
     x = np.asarray(x)
     box_length = int(box_length)
     if box_length < 1:
-        raise ValueError("window must be >= 1")
+        raise ValueError("box length must be >= 1")
     if box_length > len(x):
-        raise ValueError("window must be <= len(x)")
+        raise ValueError("box length must be <= len(x)")
 
     c = np.cumsum(np.insert(x, 0, 0))
-    interior = (c[box_length:] - c[:-box_length]) / box_length  # length = N - window + 1
+    interior = (c[box_length:] - c[:-box_length]) / box_length  # length = N - box length + 1
 
     N = len(x)
     M = len(interior)
@@ -78,20 +78,77 @@ def gaussian(x, a, x0, sigma, b):
     return a * np.exp(-(x - x0) ** 2 / (2 * sigma ** 2)) + b
 
 
-def fit_curves(T, cp_data, stop, p0=None):
-    inflections = np.empty(stop - 1)
-    for i in range(1, stop):
-        y = -np.gradient(boxcar(np.abs(cp_data[:, i]), 3))
-        x = T
+def fit_curve(T, cp_data, col_idx, p0=None):
+    """
+    Fit a Gaussian to the data in the form:
 
-        if not p0:
-            p0 = (max(y), x[len(x) // 2], 10, 0)
+    $$a \exp\left(-\frac{(x - x_0)^2}{2 \sigma^2}\right) + b$$
 
-        params, _ = curve_fit(gaussian, x, y, p0=p0)
-        a, x0, sigma, b = params
+    Returns x0 of peak. If p0 is provided, use it as the initial guess for the fit, otherwise use
+    parameters:
+        a     = max(y)
+        x0    = center of data (calculated as x[len(x) // 2])
+        sigma = 10
+        b     = 0
+    """
+    y = -np.gradient(boxcar(np.abs(cp_data[:, col_idx]), 3))
+    x = T
 
-        inflections[i - 1] = x0
+    if not p0:
+        p0 = (max(y), x[len(x) // 2], 10, 0)
 
-    return inflections
+    params, _ = curve_fit(gaussian, x, y, p0=p0)
+    a, x0, sigma, b = params
+    return x0
 
-# def step_response_wrapper(path, window, sampling_freq, freq_cutoff, temp_corr=0)
+def fit_all_curves(T, cp_data, window, p0=None):
+    """
+    Fits multiple curves to the given step response data and calculates the maximum number of
+    frequencies that can be determined within the specified window. This function uses a
+    step-by-step process to fit curves incrementally and stops once the calculation fails or the
+    window limit is reached.
+
+    Fits a Gaussian to the data in the form:
+
+    $$a \\exp\\left(-\\frac{(x - x_0)^2}{2 \\sigma^2}\\right) + b$$
+
+    If p0 is not provided, default parameters are calculated from each curve as follows:
+        a     = max(y)
+        x0    = center of data (calculated as len(x) // 2)
+        sigma = 10
+        b     = 0
+
+    Parameters
+    ----------
+    T : array-like
+        Temperature data or independent variable array used for curve fitting.
+    cp_data : array-like
+        Heat capacity data or dependent variable array corresponding to the temperatures.
+    window : int
+        The number of data points in each step.
+    p0 : array-like, optional
+        Initial guess for the fitting parameters. If not provided, the default
+        initialization is used.
+
+    Returns
+    -------
+    inflections: array-like
+        An array containing the results of the curve fitting for all successfully
+        determined frequencies. Each result corresponds to a successful curve fit.
+    stop: int
+        integer marking the last row of the data used for curve fitting.
+    """
+
+    # find max number of frequencies that can be calculated
+    stop = 1
+    inflections = np.array([])
+    while stop < window:
+        try:
+            res = fit_curve(T, cp_data, stop, p0=p0)
+            inflections = np.append(inflections, res)
+            stop += 1
+        except RuntimeError as e:
+            print(f"Error:\n  {e}\nencountered after {stop} iterations")
+            break
+
+    return inflections, stop
